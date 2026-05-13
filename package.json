@@ -1,0 +1,16 @@
+{
+  "name": "sub2api-account-checker",
+  "version": "2.2.0",
+  "description": "Tampermonkey userscript for batch-testing Sub2API account model connectivity.",
+  "private": true,
+  "scripts": {
+    "test": "node --check boji-account-tester.user.js && node --check tests/boji-account-tester.selftest.js && node tests/boji-account-tester.selftest.js"
+  },
+  "keywords": [
+    "sub2api",
+    "tampermonkey",
+    "userscript",
+    "account-checker"
+  ],
+  "license": "MIT"
+}

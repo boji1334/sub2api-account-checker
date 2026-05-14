@@ -34,6 +34,9 @@ If this tool helps you, please give the repository a Star.
    `https://你的域名/admin/accounts`
 5. 页面右下角会出现“账号模型巡检”面板，点击“开始巡检”。
 
+<img width="2560" height="1347" alt="image" src="https://github.com/user-attachments/assets/2dec30db-f314-45cd-a4e5-7894754c1fc6" />
+
+
 如果第 2 步只打开了纯文本页面，请全选复制内容，然后在 Tampermonkey 里“新建脚本”，粘贴保存即可。
 
 ### 推荐使用方式

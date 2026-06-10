@@ -94,6 +94,8 @@ function plain(value) {
       requests.push({
         path: parsed.pathname,
         search: parsed.search,
+        group: parsed.searchParams.get('group') || '',
+        subscription: parsed.searchParams.get('subscription') || '',
         method: options.method || 'GET',
         auth: headers?.get?.('Authorization') || '',
         body: options.body ? JSON.parse(options.body) : null,
@@ -112,16 +114,21 @@ function plain(value) {
       }
 
       if (parsed.pathname === '/api/v1/admin/accounts') {
-        assert.strictEqual(parsed.searchParams.get('group'), 'VIP', 'group should follow selected checker group');
-        assert.strictEqual(parsed.searchParams.get('subscription'), '', 'subscription should not be forced when group matches');
         assert.strictEqual(parsed.searchParams.get('status'), 'active', 'status should follow URL filters');
+        const group = parsed.searchParams.get('group');
+        const subscription = parsed.searchParams.get('subscription');
+        if (group || subscription) {
+          return jsonResponse({ code: 400, message: 'unsupported group filter' }, 400);
+        }
+
         const page = Number(parsed.searchParams.get('page') || 1);
         const pages = {
           1: [
-            { id: 1, name: 'ok@example.com', schedulable: true },
-            { id: 2, name: 'bad@example.com', schedulable: true },
+            { id: 1, name: 'ok@example.com', group: 'VIP', schedulable: true },
+            { id: 2, name: 'bad@example.com', group_name: 'VIP', schedulable: true },
+            { id: 4, name: 'regular@example.com', group: 'regular', schedulable: true },
           ],
-          2: [{ id: 3, email: 'late@example.com', schedulable: true }],
+          2: [{ id: 3, email: 'late@example.com', subscription: 'VIP', schedulable: true }],
         };
         return jsonResponse({ code: 0, data: { items: pages[page] || [], pages: 2 } });
       }
@@ -187,14 +194,18 @@ function plain(value) {
   assert.deepStrictEqual(
     Array.from(accounts, (account) => String(capturedApi.accountEmail(account))),
     ['ok@example.com', 'bad@example.com', 'late@example.com'],
-    'fetchAccounts should collect all pages'
+    'fetchAccounts should fall back to full-list local group filtering'
   );
 
   assert.deepStrictEqual(plain(await capturedApi.testModel(1, 'GPT-5.5')), { ok: true, reason: 'success' });
   assert.deepStrictEqual(plain(await capturedApi.testModel(2, 'GPT-5.5')), { ok: false, reason: 'mock failure' });
   assert.deepStrictEqual(plain(await capturedApi.setAccountSchedulable(2, false)), { ok: true });
 
-  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts').length, 2);
+  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.group === 'VIP').length, 1);
+  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.subscription === 'VIP').length, 1);
+  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.group === '9').length, 1);
+  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.subscription === '9').length, 1);
+  assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && !request.group && !request.subscription).length, 2);
   assert(requests.some((request) => request.path.endsWith('/2/schedulable') && request.body.schedulable === false));
 
   console.log('boji-account-tester API selftest passed');

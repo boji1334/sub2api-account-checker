@@ -2,7 +2,7 @@
 // @name         Sub2API Account Model Checker
 // @name:zh-CN   Sub2API 账号模型巡检助手
 // @namespace    https://github.com/boji1334/sub2api-account-checker
-// @version      2.4.0
+// @version      2.4.1
 // @description  Batch test Sub2API account model connectivity from the admin accounts page.
 // @description:zh-CN  在 Sub2API 账号管理页批量测试账号模型连通性，统计成功/失败。
 // @author       boji1334
@@ -139,20 +139,55 @@
   function collectGroupsFromAccounts(accounts) {
     const groups = [];
     for (const account of Array.isArray(accounts) ? accounts : []) {
-      const rawGroup =
-        account?.group ||
-        account?.group_name ||
-        account?.groupName ||
-        account?.subscription ||
-        account?.subscription_name ||
-        '';
-      if (rawGroup && typeof rawGroup === 'object') {
-        groups.push(rawGroup);
-      } else if (String(rawGroup || '').trim()) {
-        groups.push({ name: String(rawGroup).trim(), platform: account?.platform || account?.type || '' });
+      for (const rawGroup of getAccountGroupValues(account)) {
+        if (rawGroup && typeof rawGroup === 'object') {
+          groups.push(rawGroup);
+        } else if (String(rawGroup || '').trim()) {
+          groups.push({ name: String(rawGroup).trim(), platform: account?.platform || account?.type || '' });
+        }
       }
     }
     return normalizeGroupOptions(groups);
+  }
+
+  function getAccountGroupValues(account) {
+    const values = [
+      account?.group,
+      account?.group_name,
+      account?.groupName,
+      account?.group_id,
+      account?.groupId,
+      account?.subscription,
+      account?.subscription_name,
+      account?.subscriptionName,
+    ];
+    const groups = account?.groups || account?.subscriptions;
+    if (Array.isArray(groups)) values.push(...groups);
+    return values.filter((value) => value !== undefined && value !== null && value !== '');
+  }
+
+  function groupValueMatches(value, selectedGroup) {
+    if (!selectedGroup) return true;
+    if (value && typeof value === 'object') {
+      return groupValueMatches(value.id ?? value.group_id ?? value.groupId ?? '', selectedGroup) ||
+        groupValueMatches(value.name ?? value.title ?? value.label ?? value.group ?? value.subscription ?? '', selectedGroup);
+    }
+
+    const actual = String(value || '').trim().toLowerCase();
+    if (!actual) return false;
+    const expectedNames = new Set([
+      String(selectedGroup.name || '').trim().toLowerCase(),
+      String(selectedGroup.id ?? '').trim().toLowerCase(),
+    ].filter(Boolean));
+    return expectedNames.has(actual);
+  }
+
+  function filterAccountsBySelectedGroup(accounts) {
+    const selectedGroup = getSelectedGroup();
+    if (!selectedGroup) return accounts;
+    return (Array.isArray(accounts) ? accounts : []).filter((account) =>
+      getAccountGroupValues(account).some((value) => groupValueMatches(value, selectedGroup))
+    );
   }
 
   function getSelectedGroup() {
@@ -821,9 +856,23 @@
       const response = await apiFetch(url.toString(), {
         headers: { Accept: 'application/json, text/plain, */*' },
       });
-      if (!response.ok) throw new Error(`账号列表请求失败：HTTP ${response.status}`);
+      if (!response.ok) {
+        return {
+          ok: false,
+          accounts: items,
+          filters,
+          reason: `HTTP ${response.status}`,
+        };
+      }
       const json = await response.json();
-      if (json.code !== 0) throw new Error(`账号列表返回异常：${json.message || json.code}`);
+      if (json.code !== 0) {
+        return {
+          ok: false,
+          accounts: items,
+          filters,
+          reason: json.message || `code=${json.code}`,
+        };
+      }
 
       const pageItems = Array.isArray(json?.data?.items) ? json.data.items : [];
       const pageGroups = collectGroupsFromAccounts(pageItems);
@@ -845,16 +894,22 @@
       page += 1;
     }
 
-    return items;
+    return { ok: true, accounts: items, filters };
   }
 
   async function fetchAccounts() {
     const candidates = buildSelectedGroupFilterCandidates();
-    let fallbackAccounts = [];
-    let fallbackFilters = candidates[0] || getEffectiveAccountFilters();
+    let lastFailure = '';
 
     for (const filters of candidates) {
-      const accounts = await fetchAccountsWithFilters(filters);
+      const result = await fetchAccountsWithFilters(filters);
+      if (!result.ok) {
+        lastFailure = `${accountFilterSummary(filters)}：${result.reason}`;
+        if (getSelectedGroup()) continue;
+        throw new Error(`账号列表请求失败：${result.reason}`);
+      }
+
+      const accounts = result.accounts;
       if (!getSelectedGroup()) {
         state.lastAppliedFilters = filters;
         return accounts;
@@ -866,12 +921,30 @@
         }
         return accounts;
       }
-      fallbackAccounts = accounts;
-      fallbackFilters = filters;
     }
 
-    state.lastAppliedFilters = fallbackFilters;
-    return fallbackAccounts;
+    const selectedGroup = getSelectedGroup();
+    if (selectedGroup) {
+      const baseFilters = normalizeAccountFilters(state.accountFilters);
+      baseFilters.group = '';
+      baseFilters.subscription = '';
+      const result = await fetchAccountsWithFilters(baseFilters);
+      if (!result.ok) {
+        throw new Error(`账号列表请求失败：${result.reason}${lastFailure ? `；最后一次分组筛选：${lastFailure}` : ''}`);
+      }
+
+      const filtered = filterAccountsBySelectedGroup(result.accounts);
+      state.lastAppliedFilters = baseFilters;
+      if (filtered.length) {
+        const fallbackReason = lastFailure ? '接口分组筛选不可用，' : '';
+        log(`${fallbackReason}已自动按账号字段匹配分组：${selectedGroup.name}，命中 ${filtered.length} 个`, 'success');
+        return filtered;
+      }
+
+      throw new Error(`已拉取 ${result.accounts.length} 个账号，但没有账号字段匹配分组：${selectedGroup.name}`);
+    }
+
+    return [];
   }
 
   function accountEmail(account) {

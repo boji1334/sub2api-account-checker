@@ -2,7 +2,7 @@
 // @name         Sub2API Account Model Checker
 // @name:zh-CN   Sub2API 账号模型巡检助手
 // @namespace    https://github.com/boji1334/sub2api-account-checker
-// @version      2.3.0
+// @version      2.4.0
 // @description  Batch test Sub2API account model connectivity from the admin accounts page.
 // @description:zh-CN  在 Sub2API 账号管理页批量测试账号模型连通性，统计成功/失败。
 // @author       boji1334
@@ -30,6 +30,7 @@
     authStorageKey: '__boji_account_checker_auth__',
     timeoutStorageKey: '__boji_account_checker_timeout_ms__',
     testModelStorageKey: '__boji_account_checker_test_model__',
+    selectedGroupStorageKey: '__boji_account_checker_selected_group__',
     disableStorageKey: '__boji_account_checker_disable_failed__',
   };
 
@@ -41,6 +42,9 @@
     timeoutMs: Number(localStorage.getItem(CONFIG.timeoutStorageKey) || CONFIG.defaultTimeoutMs),
     testModel: normalizeModelId(localStorage.getItem(CONFIG.testModelStorageKey) || CONFIG.defaultTestModel),
     accountFilters: getLocationAccountFilters(),
+    groups: [],
+    selectedGroupKey: localStorage.getItem(CONFIG.selectedGroupStorageKey) || '',
+    lastAppliedFilters: null,
     disableFailed: localStorage.getItem(CONFIG.disableStorageKey) === 'true',
     running: false,
     stopRequested: false,
@@ -82,6 +86,80 @@
     return next;
   }
 
+  function groupKey(group) {
+    if (!group) return '';
+    if (group.id !== undefined && group.id !== null && group.id !== '') return `id:${group.id}`;
+    if (group.name) return `name:${String(group.name).toLowerCase()}`;
+    return '';
+  }
+
+  function normalizeGroupOption(group) {
+    if (!group || typeof group !== 'object') return null;
+    const name = String(group.name || group.title || group.label || group.group || group.subscription || '').trim();
+    const id = group.id ?? group.group_id ?? group.groupId ?? '';
+    const platform = String(group.platform || group.type || '').trim();
+    if (!name && (id === '' || id === null || id === undefined)) return null;
+    const normalized = {
+      id,
+      name: name || String(id),
+      platform,
+      raw: group,
+    };
+    normalized.key = groupKey(normalized);
+    return normalized.key ? normalized : null;
+  }
+
+  function normalizeGroupOptions(groups) {
+    const seen = new Set();
+    const result = [];
+    for (const group of Array.isArray(groups) ? groups : []) {
+      const option = normalizeGroupOption(group);
+      if (!option || seen.has(option.key)) continue;
+      seen.add(option.key);
+      result.push(option);
+    }
+    return result.sort((a, b) => {
+      const platformScore = (item) => (!item.platform || item.platform === 'openai' ? 0 : 1);
+      return platformScore(a) - platformScore(b) || a.name.localeCompare(b.name, 'zh-Hans-CN');
+    });
+  }
+
+  function mergeGroups(groups) {
+    const seen = new Set();
+    const merged = [];
+    for (const group of [...state.groups, ...normalizeGroupOptions(groups)]) {
+      if (!group || seen.has(group.key)) continue;
+      seen.add(group.key);
+      merged.push(group);
+    }
+    state.groups = merged;
+    renderGroupOptions();
+  }
+
+  function collectGroupsFromAccounts(accounts) {
+    const groups = [];
+    for (const account of Array.isArray(accounts) ? accounts : []) {
+      const rawGroup =
+        account?.group ||
+        account?.group_name ||
+        account?.groupName ||
+        account?.subscription ||
+        account?.subscription_name ||
+        '';
+      if (rawGroup && typeof rawGroup === 'object') {
+        groups.push(rawGroup);
+      } else if (String(rawGroup || '').trim()) {
+        groups.push({ name: String(rawGroup).trim(), platform: account?.platform || account?.type || '' });
+      }
+    }
+    return normalizeGroupOptions(groups);
+  }
+
+  function getSelectedGroup() {
+    if (!state.selectedGroupKey) return null;
+    return state.groups.find((group) => group.key === state.selectedGroupKey) || null;
+  }
+
   function getLocationAccountFilters() {
     const filters = {};
     const params = new URLSearchParams(location.search || '');
@@ -120,13 +198,56 @@
     return visible.length ? visible.join('&') : '全部账号';
   }
 
+  function getEffectiveAccountFilters() {
+    const filters = normalizeAccountFilters(state.accountFilters);
+    const selectedGroup = getSelectedGroup();
+    if (!selectedGroup) return filters;
+
+    filters.group = selectedGroup.name || String(selectedGroup.id || '');
+    filters.subscription = '';
+    return filters;
+  }
+
+  function buildSelectedGroupFilterCandidates() {
+    const selectedGroup = getSelectedGroup();
+    if (!selectedGroup) return [getEffectiveAccountFilters()];
+
+    const base = normalizeAccountFilters(state.accountFilters);
+    const candidates = [];
+    const add = (key, value) => {
+      const clean = String(value ?? '').trim();
+      if (!clean) return;
+      const filters = normalizeAccountFilters(base);
+      filters.group = '';
+      filters.subscription = '';
+      filters[key] = clean;
+      const signature = accountFilterSummary(filters);
+      if (candidates.some((item) => item.signature === signature)) return;
+      candidates.push({ filters, signature });
+    };
+
+    add('group', selectedGroup.name);
+    add('group', selectedGroup.id);
+    add('subscription', selectedGroup.name);
+    add('subscription', selectedGroup.id);
+
+    return candidates.length ? candidates.map((item) => item.filters) : [base];
+  }
+
+  function effectiveFilterSummary() {
+    const selectedGroup = getSelectedGroup();
+    if (selectedGroup) return `分组=${selectedGroup.name}`;
+    return accountFilterSummary(getEffectiveAccountFilters());
+  }
+
   function updateFilterHint() {
     if (typeof document === 'undefined') return;
     const el = document.querySelector('#boji-account-checker-filter');
-    if (el) el.textContent = `当前筛选：${accountFilterSummary()}`;
+    if (el) el.textContent = `当前筛选：${effectiveFilterSummary()}`;
   }
 
   function rememberAccountFilters(filters) {
+    if (state.selectedGroupKey) return;
     const next = normalizeAccountFilters(filters);
     const oldSummary = accountFilterSummary(state.accountFilters);
     const nextSummary = accountFilterSummary(next);
@@ -134,6 +255,55 @@
     updateFilterHint();
     if (oldSummary !== nextSummary && typeof document !== 'undefined' && document.querySelector('#boji-account-checker-log')) {
       log(`已同步页面筛选：${nextSummary}`, 'success');
+    }
+  }
+
+  function renderGroupOptions() {
+    if (typeof document === 'undefined') return;
+    const select = document.querySelector('#boji-account-checker-group');
+    if (!select) return;
+
+    const current = state.selectedGroupKey;
+    select.innerHTML = '';
+    select.appendChild(new Option('全部分组', ''));
+    for (const group of state.groups) {
+      const label = group.platform && group.platform !== 'openai' ? `${group.name} (${group.platform})` : group.name;
+      select.appendChild(new Option(label, group.key));
+    }
+
+    if (current && state.groups.some((group) => group.key === current)) {
+      select.value = current;
+    } else {
+      state.selectedGroupKey = '';
+      select.value = '';
+      localStorage.removeItem(CONFIG.selectedGroupStorageKey);
+    }
+    updateFilterHint();
+  }
+
+  async function fetchGroups() {
+    const response = await apiFetch(`${CONFIG.apiBase}/api/v1/admin/groups/all`, {
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+    if (!response.ok) throw new Error(`分组列表请求失败：HTTP ${response.status}`);
+    const json = await response.json();
+    if (json.code !== 0) throw new Error(`分组列表返回异常：${json.message || json.code}`);
+    return normalizeGroupOptions(json?.data || []);
+  }
+
+  async function refreshGroups() {
+    try {
+      const groups = await fetchGroups();
+      if (groups.length) {
+        state.groups = groups;
+        renderGroupOptions();
+        return groups;
+      }
+      log('分组接口返回为空，将继续使用账号列表筛选', 'warn');
+      return [];
+    } catch (error) {
+      log(`分组加载失败：${error.message || error}`, 'warn');
+      return [];
     }
   }
 
@@ -151,6 +321,7 @@
     const line = `[${time}] ${message}`;
     console[type === 'error' ? 'error' : 'log'](`[boji-account-checker] ${line}`);
 
+    if (typeof document === 'undefined') return;
     const box = document.querySelector('#boji-account-checker-log');
     if (!box) return;
 
@@ -274,18 +445,21 @@
         position: fixed;
         right: 18px;
         bottom: 18px;
-        z-index: 2147483000;
+        z-index: 1000;
         color: #e7eefc;
         font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
       }
       #boji-account-checker-panel {
-        width: 460px;
+        width: 380px;
         max-width: calc(100vw - 36px);
         background: #101b2b;
         border: 1px solid rgba(137, 161, 194, 0.28);
         border-radius: 10px;
         box-shadow: 0 16px 54px rgba(0, 0, 0, 0.48);
         overflow: hidden;
+        max-height: min(720px, calc(100vh - 220px));
+        display: flex;
+        flex-direction: column;
       }
       #boji-account-checker-panel.collapsed .bac-body {
         display: none;
@@ -323,11 +497,18 @@
         display: grid;
         gap: 10px;
         padding: 12px;
+        overflow: auto;
       }
       .bac-grid {
         display: grid;
         grid-template-columns: 1fr 120px;
         gap: 8px;
+      }
+      .bac-group-grid {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: end;
       }
       .bac-field {
         display: grid;
@@ -335,6 +516,7 @@
         color: #9fb0c8;
       }
       .bac-field input,
+      .bac-field select,
       .bac-field textarea {
         width: 100%;
         border: 1px solid rgba(137, 161, 194, 0.28);
@@ -344,6 +526,10 @@
         padding: 8px;
         outline: none;
         font: inherit;
+      }
+      .bac-field select {
+        min-height: 34px;
+        appearance: auto;
       }
       .bac-field textarea {
         min-height: 46px;
@@ -421,7 +607,7 @@
       .bac-stat.ok strong { color: #3ee089; }
       .bac-stat.failed strong { color: #ff6b6b; }
       #boji-account-checker-log {
-        height: 260px;
+        height: 180px;
         overflow: auto;
         padding: 8px;
         border-radius: 8px;
@@ -468,6 +654,15 @@
               超时秒数
               <input id="boji-account-checker-timeout" type="number" min="1" step="1" value="${Math.max(1, Math.round(state.timeoutMs / 1000))}">
             </label>
+          </div>
+          <div class="bac-group-grid">
+            <label class="bac-field">
+              巡检分组
+              <select id="boji-account-checker-group">
+                <option value="">全部分组</option>
+              </select>
+            </label>
+            <button id="boji-account-checker-refresh-groups" title="刷新分组">刷新</button>
           </div>
           <div id="boji-account-checker-filter" class="bac-filter">当前筛选：${escapeHtml(accountFilterSummary())}</div>
           <div class="bac-row">
@@ -519,6 +714,21 @@
       state.timeoutMs = seconds * 1000;
       localStorage.setItem(CONFIG.timeoutStorageKey, String(state.timeoutMs));
       log(`已设置超时：${seconds} 秒`, 'success');
+    });
+    shell.querySelector('#boji-account-checker-group').addEventListener('change', (event) => {
+      state.selectedGroupKey = event.target.value;
+      if (state.selectedGroupKey) {
+        localStorage.setItem(CONFIG.selectedGroupStorageKey, state.selectedGroupKey);
+      } else {
+        localStorage.removeItem(CONFIG.selectedGroupStorageKey);
+      }
+      updateFilterHint();
+      log(`已选择巡检范围：${effectiveFilterSummary()}`, 'success');
+    });
+    shell.querySelector('#boji-account-checker-refresh-groups').addEventListener('click', () => {
+      refreshGroups().then((groups) => {
+        log(groups.length ? `已刷新 ${groups.length} 个分组` : '没有读取到分组', groups.length ? 'success' : 'warn');
+      });
     });
     shell.querySelector('#boji-account-checker-disable').addEventListener('change', (event) => {
       state.disableFailed = event.target.checked;
@@ -586,7 +796,7 @@
     });
   }
 
-  function applyAccountFilters(url, filters = state.accountFilters) {
+  function applyAccountFilters(url, filters = getEffectiveAccountFilters()) {
     for (const key of ACCOUNT_DEFAULT_FILTER_KEYS) {
       url.searchParams.set(key, '');
     }
@@ -596,7 +806,7 @@
     }
   }
 
-  async function fetchAccounts() {
+  async function fetchAccountsWithFilters(filters) {
     const items = [];
     const seenIds = new Set();
     let page = 1;
@@ -605,7 +815,7 @@
       const url = new URL('/api/v1/admin/accounts', CONFIG.apiBase);
       url.searchParams.set('page', String(page));
       url.searchParams.set('page_size', String(CONFIG.pageSize));
-      applyAccountFilters(url);
+      applyAccountFilters(url, filters);
       url.searchParams.set('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai');
 
       const response = await apiFetch(url.toString(), {
@@ -616,6 +826,8 @@
       if (json.code !== 0) throw new Error(`账号列表返回异常：${json.message || json.code}`);
 
       const pageItems = Array.isArray(json?.data?.items) ? json.data.items : [];
+      const pageGroups = collectGroupsFromAccounts(pageItems);
+      if (pageGroups.length) mergeGroups(pageGroups);
       for (const item of pageItems) {
         const key = item?.id == null ? `${page}:${items.length}` : String(item.id);
         if (seenIds.has(key)) continue;
@@ -634,6 +846,32 @@
     }
 
     return items;
+  }
+
+  async function fetchAccounts() {
+    const candidates = buildSelectedGroupFilterCandidates();
+    let fallbackAccounts = [];
+    let fallbackFilters = candidates[0] || getEffectiveAccountFilters();
+
+    for (const filters of candidates) {
+      const accounts = await fetchAccountsWithFilters(filters);
+      if (!getSelectedGroup()) {
+        state.lastAppliedFilters = filters;
+        return accounts;
+      }
+      if (accounts.length) {
+        state.lastAppliedFilters = filters;
+        if (candidates.length > 1) {
+          log(`已匹配筛选参数：${accountFilterSummary(filters)}`, 'success');
+        }
+        return accounts;
+      }
+      fallbackAccounts = accounts;
+      fallbackFilters = filters;
+    }
+
+    state.lastAppliedFilters = fallbackFilters;
+    return fallbackAccounts;
   }
 
   function accountEmail(account) {
@@ -785,7 +1023,7 @@
     updateFilterHint();
 
     try {
-      log(`开始拉取账号列表（${accountFilterSummary()}）`);
+      log(`开始拉取账号列表（${effectiveFilterSummary()}）`);
       const accounts = await fetchAccounts();
       log(`接口返回 ${accounts.length} 个账号`, 'success');
 
@@ -837,9 +1075,13 @@
       CONFIG,
       state,
       fetchAccounts,
+      fetchGroups,
+      refreshGroups,
+      normalizeGroupOptions,
       rememberAccountFilters,
       getAccountFiltersFromUrl,
       accountFilterSummary,
+      effectiveFilterSummary,
       testModel,
       setAccountSchedulable,
       accountEmail,
@@ -851,6 +1093,7 @@
   injectAuthSniffer();
   waitDomReady().then(() => {
     ensurePanel();
+    refreshGroups();
     if (state.authHeader) {
       log('脚本已就绪，已读取 Authorization', 'success');
     } else {

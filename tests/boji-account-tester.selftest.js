@@ -101,8 +101,19 @@ function plain(value) {
 
       assert.strictEqual(headers?.get?.('Authorization'), 'Bearer token-123', 'Authorization should be attached');
 
+      if (parsed.pathname === '/api/v1/admin/groups/all') {
+        return jsonResponse({
+          code: 0,
+          data: [
+            { id: 7, name: 'regular', platform: 'openai' },
+            { id: 9, name: 'VIP', platform: 'openai' },
+          ],
+        });
+      }
+
       if (parsed.pathname === '/api/v1/admin/accounts') {
-        assert.strictEqual(parsed.searchParams.get('subscription'), 'VIP', 'subscription should follow captured page filters');
+        assert.strictEqual(parsed.searchParams.get('group'), 'VIP', 'group should follow selected checker group');
+        assert.strictEqual(parsed.searchParams.get('subscription'), '', 'subscription should not be forced when group matches');
         assert.strictEqual(parsed.searchParams.get('status'), 'active', 'status should follow URL filters');
         const page = Number(parsed.searchParams.get('page') || 1);
         const pages = {
@@ -144,6 +155,13 @@ function plain(value) {
   assert.strictEqual(capturedApi.state.testModel, 'gpt-5.5');
   assert.strictEqual(capturedApi.state.currentPageOnly, undefined, 'page scan filter should be removed');
   assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active');
+  const normalizedGroups = plain(capturedApi.normalizeGroupOptions([
+    { id: 9, name: 'VIP', platform: 'openai' },
+    { id: 9, name: 'VIP', platform: 'openai' },
+  ]));
+  assert.strictEqual(normalizedGroups.length, 1, 'group options should deduplicate groups');
+  assert.strictEqual(normalizedGroups[0].key, 'id:9');
+  assert.strictEqual(normalizedGroups[0].name, 'VIP');
   assert.deepStrictEqual(
     plain(capturedApi.getAccountFiltersFromUrl('/api/v1/admin/accounts?page=1&page_size=10&status=active&subscription=VIP')),
     {
@@ -158,8 +176,12 @@ function plain(value) {
     'account list URL filters should be parsed without pagination keys'
   );
 
-  capturedApi.rememberAccountFilters({ status: 'active', subscription: 'VIP' });
-  assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active&subscription=VIP');
+  const groups = await capturedApi.fetchGroups();
+  capturedApi.state.groups = groups;
+  capturedApi.state.selectedGroupKey = 'id:9';
+  capturedApi.rememberAccountFilters({ status: 'disabled', subscription: 'ignored' });
+  assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active', 'page filters should not override a manual group choice');
+  assert.strictEqual(capturedApi.effectiveFilterSummary(), '分组=VIP');
 
   const accounts = await capturedApi.fetchAccounts();
   assert.deepStrictEqual(

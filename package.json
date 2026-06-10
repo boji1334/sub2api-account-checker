@@ -1,6 +1,6 @@
 {
   "name": "sub2api-account-checker",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Tampermonkey userscript for batch-testing Sub2API account model connectivity.",
   "private": true,
   "scripts": {

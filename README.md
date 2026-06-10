@@ -16,7 +16,7 @@ If this tool helps you, please give the repository a Star.
 
 - 默认测试模型：`gpt-5.5`
 - 默认单账号超时：`10` 秒
-- 默认勾选“按页面滚动扫描过滤账号”，适合只检测当前分组/当前页面列表
+- 自动同步账号页当前筛选条件，适合下拉选择 VIP 等分组后巡检完整列表
 - 自动读取当前页面的 Authorization，也支持手动粘贴
 - 自动分页拉取账号，逐个调用测试接口
 - 成功绿色、失败红色，实时统计总数/已测/成功/失败
@@ -41,17 +41,11 @@ If this tool helps you, please give the repository a Star.
 
 ### 推荐使用方式
 
-1. 先在 Sub2API 后台筛选好平台、分组、状态或搜索条件。
-2. 保持“按页面滚动扫描过滤账号”勾选。
+1. 先在 Sub2API 后台账号页下拉选择分组、状态或搜索条件。
+2. 等页面账号列表刷新完成，面板会显示“当前筛选”。
 3. 确认测试模型是 `gpt-5.5`。
 4. 点击“开始巡检”。
 5. 巡检结束后点击“复制失败邮箱”，交给客户或运维处理。
-
-如果你的筛选条件没有体现在地址栏，也可以在“额外查询参数”里手动写：
-
-```text
-group=xxx&subscription=plus
-```
 
 ### 自动关闭调度
 
@@ -109,7 +103,7 @@ A Tampermonkey userscript for batch-testing Sub2API account model connectivity o
 
 - Default test model: `gpt-5.5`
 - Default per-account timeout: `10` seconds
-- Page-scroll filtering is enabled by default, useful for testing the current group/current visible account list
+- Automatically follows the current account-page filters, useful after selecting a group such as VIP
 - Captures the current page Authorization automatically, with manual paste fallback
 - Fetches accounts page by page and tests them one by one
 - Green success logs, red failure logs, and live counters
@@ -131,17 +125,11 @@ If step 2 opens plain text, copy all content, create a new script in Tampermonke
 
 ### Recommended Workflow
 
-1. Filter platform, group, status, or search terms in the Sub2API admin UI.
-2. Keep “page-scroll filtering” checked.
+1. Select the group, status, or search terms in the Sub2API admin accounts page.
+2. Wait for the account list to refresh; the panel shows the current filter summary.
 3. Confirm the test model is `gpt-5.5`.
 4. Click “Start”.
 5. After the run finishes, click “Copy failed emails”.
-
-If your filters are not reflected in the URL, type extra query parameters manually:
-
-```text
-group=xxx&subscription=plus
-```
 
 ### Disable Scheduling
 

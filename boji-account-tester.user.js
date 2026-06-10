@@ -2,7 +2,7 @@
 // @name         Sub2API Account Model Checker
 // @name:zh-CN   Sub2API 账号模型巡检助手
 // @namespace    https://github.com/boji1334/sub2api-account-checker
-// @version      2.2.0
+// @version      2.3.0
 // @description  Batch test Sub2API account model connectivity from the admin accounts page.
 // @description:zh-CN  在 Sub2API 账号管理页批量测试账号模型连通性，统计成功/失败。
 // @author       boji1334
@@ -30,20 +30,18 @@
     authStorageKey: '__boji_account_checker_auth__',
     timeoutStorageKey: '__boji_account_checker_timeout_ms__',
     testModelStorageKey: '__boji_account_checker_test_model__',
-    queryStorageKey: '__boji_account_checker_query__',
     disableStorageKey: '__boji_account_checker_disable_failed__',
-    currentPageStorageKey: '__boji_account_checker_current_page_only__',
   };
 
-  const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+  const ACCOUNT_FILTER_EXCLUDE_KEYS = new Set(['page', 'page_size', 'timezone']);
+  const ACCOUNT_DEFAULT_FILTER_KEYS = ['platform', 'type', 'status', 'privacy_mode', 'group', 'search', 'subscription'];
 
   const state = {
     authHeader: getCachedAuthToken(),
     timeoutMs: Number(localStorage.getItem(CONFIG.timeoutStorageKey) || CONFIG.defaultTimeoutMs),
     testModel: normalizeModelId(localStorage.getItem(CONFIG.testModelStorageKey) || CONFIG.defaultTestModel),
-    extraQuery: localStorage.getItem(CONFIG.queryStorageKey) || '',
+    accountFilters: getLocationAccountFilters(),
     disableFailed: localStorage.getItem(CONFIG.disableStorageKey) === 'true',
-    currentPageOnly: localStorage.getItem(CONFIG.currentPageStorageKey) !== 'false',
     running: false,
     stopRequested: false,
     panelReady: false,
@@ -58,14 +56,6 @@
       skipped: 0,
     },
   };
-
-  function normalizeText(value) {
-    return String(value || '').replace(/\s+/g, ' ').trim();
-  }
-
-  function getEmailsFromText(text) {
-    return Array.from(new Set((String(text || '').match(EMAIL_RE) || []).map((email) => email.trim())));
-  }
 
   function normalizeModelId(model) {
     const value = String(model || '').trim();
@@ -82,8 +72,69 @@
     return aliases[compact] || value;
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  function normalizeAccountFilters(filters = {}) {
+    const next = {};
+    for (const key of ACCOUNT_DEFAULT_FILTER_KEYS) next[key] = '';
+    for (const [key, value] of Object.entries(filters || {})) {
+      if (ACCOUNT_FILTER_EXCLUDE_KEYS.has(key)) continue;
+      next[key] = String(value ?? '');
+    }
+    return next;
+  }
+
+  function getLocationAccountFilters() {
+    const filters = {};
+    const params = new URLSearchParams(location.search || '');
+    for (const [key, value] of params.entries()) {
+      if (!ACCOUNT_FILTER_EXCLUDE_KEYS.has(key)) filters[key] = value;
+    }
+    return normalizeAccountFilters(filters);
+  }
+
+  function normalizePath(path) {
+    let value = String(path || '');
+    while (value.length > 1 && value.endsWith('/')) value = value.slice(0, -1);
+    return value;
+  }
+
+  function getAccountFiltersFromUrl(urlLike) {
+    try {
+      const rawUrl = typeof urlLike === 'string' ? urlLike : urlLike?.url || String(urlLike || '');
+      const url = new URL(rawUrl, location.origin);
+      if (url.origin !== location.origin || normalizePath(url.pathname) !== '/api/v1/admin/accounts') return null;
+
+      const filters = {};
+      for (const [key, value] of url.searchParams.entries()) {
+        if (!ACCOUNT_FILTER_EXCLUDE_KEYS.has(key)) filters[key] = value;
+      }
+      return normalizeAccountFilters(filters);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function accountFilterSummary(filters = state.accountFilters) {
+    const visible = Object.entries(filters || {})
+      .filter(([key, value]) => !ACCOUNT_FILTER_EXCLUDE_KEYS.has(key) && String(value || '') !== '')
+      .map(([key, value]) => `${key}=${value}`);
+    return visible.length ? visible.join('&') : '全部账号';
+  }
+
+  function updateFilterHint() {
+    if (typeof document === 'undefined') return;
+    const el = document.querySelector('#boji-account-checker-filter');
+    if (el) el.textContent = `当前筛选：${accountFilterSummary()}`;
+  }
+
+  function rememberAccountFilters(filters) {
+    const next = normalizeAccountFilters(filters);
+    const oldSummary = accountFilterSummary(state.accountFilters);
+    const nextSummary = accountFilterSummary(next);
+    state.accountFilters = next;
+    updateFilterHint();
+    if (oldSummary !== nextSummary && typeof document !== 'undefined' && document.querySelector('#boji-account-checker-log')) {
+      log(`已同步页面筛选：${nextSummary}`, 'success');
+    }
   }
 
   function getCachedAuthToken() {
@@ -128,6 +179,22 @@
           if (!auth) return;
           document.dispatchEvent(new CustomEvent('__boji_account_checker_auth__', { detail: auth }));
         };
+        const emitAccountFilters = (urlLike) => {
+          try {
+            const rawUrl = typeof urlLike === 'string' ? urlLike : (urlLike && urlLike.url) || String(urlLike || '');
+            const url = new URL(rawUrl, location.origin);
+            let path = String(url.pathname || '');
+            while (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
+            if (url.origin !== location.origin || path !== '/api/v1/admin/accounts') return;
+
+            const filters = {};
+            for (const [key, value] of url.searchParams.entries()) {
+              if (key === 'page' || key === 'page_size' || key === 'timezone') continue;
+              filters[key] = value;
+            }
+            document.dispatchEvent(new CustomEvent('__boji_account_checker_account_filters__', { detail: filters }));
+          } catch (_) {}
+        };
         const pickAuth = (headersLike) => {
           try {
             if (!headersLike) return '';
@@ -154,14 +221,16 @@
           window.fetch = function(input, init) {
             const auth = pickAuth(init && init.headers) || pickAuth(input && input.headers);
             if (auth) emit(auth);
+            emitAccountFilters(input);
             return originalFetch.apply(this, arguments);
           };
         }
 
         const originalOpen = XMLHttpRequest.prototype.open;
         const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-        XMLHttpRequest.prototype.open = function() {
+        XMLHttpRequest.prototype.open = function(method, url) {
           this.__bojiAccountCheckerAuth = '';
+          emitAccountFilters(url);
           return originalOpen.apply(this, arguments);
         };
         XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
@@ -178,6 +247,9 @@
 
     document.addEventListener('__boji_account_checker_auth__', (event) => {
       saveAuth(event.detail);
+    });
+    document.addEventListener('__boji_account_checker_account_filters__', (event) => {
+      rememberAccountFilters(event.detail);
     });
   }
 
@@ -276,6 +348,16 @@
       .bac-field textarea {
         min-height: 46px;
         resize: vertical;
+      }
+      .bac-filter {
+        color: #b8c7db;
+        border: 1px solid rgba(137, 161, 194, 0.16);
+        border-radius: 7px;
+        background: rgba(11, 19, 32, 0.78);
+        padding: 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .bac-row {
         display: flex;
@@ -387,15 +469,8 @@
               <input id="boji-account-checker-timeout" type="number" min="1" step="1" value="${Math.max(1, Math.round(state.timeoutMs / 1000))}">
             </label>
           </div>
-          <label class="bac-field">
-            额外查询参数，可留空；会覆盖地址栏同名参数。例如：subscription=plus&group=xxx
-            <textarea id="boji-account-checker-query" placeholder="subscription=plus">${escapeHtml(state.extraQuery)}</textarea>
-          </label>
+          <div id="boji-account-checker-filter" class="bac-filter">当前筛选：${escapeHtml(accountFilterSummary())}</div>
           <div class="bac-row">
-            <label class="bac-check">
-              <input id="boji-account-checker-current-page" type="checkbox" ${state.currentPageOnly ? 'checked' : ''}>
-              按页面滚动扫描过滤账号（备用）
-            </label>
             <label class="bac-check">
               <input id="boji-account-checker-disable" type="checkbox" ${state.disableFailed ? 'checked' : ''}>
               失败自动关闭调度
@@ -445,20 +520,10 @@
       localStorage.setItem(CONFIG.timeoutStorageKey, String(state.timeoutMs));
       log(`已设置超时：${seconds} 秒`, 'success');
     });
-    shell.querySelector('#boji-account-checker-query').addEventListener('change', (event) => {
-      state.extraQuery = event.target.value.trim();
-      localStorage.setItem(CONFIG.queryStorageKey, state.extraQuery);
-      log('已保存额外查询参数', 'success');
-    });
     shell.querySelector('#boji-account-checker-disable').addEventListener('change', (event) => {
       state.disableFailed = event.target.checked;
       localStorage.setItem(CONFIG.disableStorageKey, String(state.disableFailed));
       log(state.disableFailed ? '失败账号会自动关闭调度' : '失败账号只统计，不自动关闭', state.disableFailed ? 'warn' : 'success');
-    });
-    shell.querySelector('#boji-account-checker-current-page').addEventListener('change', (event) => {
-      state.currentPageOnly = event.target.checked;
-      localStorage.setItem(CONFIG.currentPageStorageKey, String(state.currentPageOnly));
-      log(state.currentPageOnly ? '将按页面扫描到的账号过滤' : '将按接口返回账号巡检', 'success');
     });
     shell.querySelector('#boji-account-checker-start').addEventListener('click', () => run().catch((error) => {
       state.running = false;
@@ -521,42 +586,27 @@
     });
   }
 
-  function applyExtraQuery(url) {
-    const raw = normalizeText(state.extraQuery);
-    if (!raw) return;
-    const params = new URLSearchParams(raw.replace(/^\?/, ''));
-    for (const [key, value] of params.entries()) {
-      url.searchParams.set(key, value);
+  function applyAccountFilters(url, filters = state.accountFilters) {
+    for (const key of ACCOUNT_DEFAULT_FILTER_KEYS) {
+      url.searchParams.set(key, '');
     }
-  }
-
-  function applyLocationFilters(url) {
-    const allowed = new Set(['platform', 'type', 'status', 'privacy_mode', 'group', 'search']);
-    const params = new URLSearchParams(location.search || '');
-    for (const [key, value] of params.entries()) {
-      if (allowed.has(key) && value !== '') {
-        url.searchParams.set(key, value);
-      }
+    for (const [key, value] of Object.entries(normalizeAccountFilters(filters))) {
+      if (ACCOUNT_FILTER_EXCLUDE_KEYS.has(key)) continue;
+      url.searchParams.set(key, value);
     }
   }
 
   async function fetchAccounts() {
     const items = [];
+    const seenIds = new Set();
     let page = 1;
 
     while (true) {
       const url = new URL('/api/v1/admin/accounts', CONFIG.apiBase);
       url.searchParams.set('page', String(page));
       url.searchParams.set('page_size', String(CONFIG.pageSize));
-      url.searchParams.set('platform', '');
-      url.searchParams.set('type', '');
-      url.searchParams.set('status', '');
-      url.searchParams.set('privacy_mode', '');
-      url.searchParams.set('group', '');
-      url.searchParams.set('search', '');
+      applyAccountFilters(url);
       url.searchParams.set('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai');
-      applyLocationFilters(url);
-      applyExtraQuery(url);
 
       const response = await apiFetch(url.toString(), {
         headers: { Accept: 'application/json, text/plain, */*' },
@@ -565,11 +615,21 @@
       const json = await response.json();
       if (json.code !== 0) throw new Error(`账号列表返回异常：${json.message || json.code}`);
 
-      const pageItems = json?.data?.items || [];
-      items.push(...pageItems);
+      const pageItems = Array.isArray(json?.data?.items) ? json.data.items : [];
+      for (const item of pageItems) {
+        const key = item?.id == null ? `${page}:${items.length}` : String(item.id);
+        if (seenIds.has(key)) continue;
+        seenIds.add(key);
+        items.push(item);
+      }
 
-      const pages = Number(json?.data?.pages || 1);
-      if (page >= pages || !pageItems.length) break;
+      const pages = Number(json?.data?.pages || json?.data?.total_pages || 0);
+      const total = Number(json?.data?.total || json?.data?.count || 0);
+      const hasExplicitNext = typeof json?.data?.has_next === 'boolean' ? json.data.has_next : null;
+      const reachedKnownTotal = total > 0 && items.length >= total;
+      const reachedKnownPages = pages > 0 && page >= pages;
+      const shortPage = pageItems.length < CONFIG.pageSize;
+      if (!pageItems.length || hasExplicitNext === false || reachedKnownTotal || reachedKnownPages || (pages <= 0 && shortPage)) break;
       page += 1;
     }
 
@@ -589,137 +649,6 @@
 
   function accountTitle(account) {
     return `#${account.id} ${accountEmail(account) || account.name || '(未命名)'}`;
-  }
-
-  function isVisible(el) {
-    if (!el || el.closest?.('#boji-account-checker-shell')) return false;
-    const style = getComputedStyle(el);
-    const opacity = style.opacity === '' ? 1 : Number(style.opacity);
-    if (style.display === 'none' || style.visibility === 'hidden' || opacity === 0) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
-  }
-
-  function findAccountScrollContainer() {
-    const candidates = Array.from(document.querySelectorAll('main, section, article, div, table, tbody, [role="table"], [role="grid"]'))
-      .filter((el) => {
-        if (!isVisible(el)) return false;
-        const text = normalizeText(el.innerText || el.textContent || '');
-        return el.scrollHeight > el.clientHeight + 30 && getEmailsFromText(text).length > 0;
-      })
-      .map((el) => {
-        const rect = el.getBoundingClientRect();
-        const emailCount = getEmailsFromText(el.innerText || el.textContent || '').length;
-        return { el, score: emailCount * 100000 - rect.width * rect.height };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    return candidates[0]?.el || document.scrollingElement || document.documentElement;
-  }
-
-  function getScrollTop(el) {
-    if (el === document.scrollingElement || el === document.documentElement || el === document.body) {
-      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-    }
-    return el.scrollTop;
-  }
-
-  function setScrollTop(el, value) {
-    if (el === document.scrollingElement || el === document.documentElement || el === document.body) {
-      window.scrollTo({ top: value, behavior: 'instant' });
-      document.documentElement.scrollTop = value;
-      document.body.scrollTop = value;
-      return;
-    }
-    el.scrollTop = value;
-  }
-
-  function getMaxScrollTop(el) {
-    if (el === document.scrollingElement || el === document.documentElement || el === document.body) {
-      return Math.max(0, document.documentElement.scrollHeight - innerHeight);
-    }
-    return Math.max(0, el.scrollHeight - el.clientHeight);
-  }
-
-  async function scanCurrentPageEmails() {
-    const scroller = findAccountScrollContainer();
-    const originalTop = getScrollTop(scroller);
-    const max = getMaxScrollTop(scroller);
-    const step = Math.max(140, Math.floor((scroller.clientHeight || innerHeight) * 0.55));
-    const emails = [];
-    const seenRows = new Set();
-
-    const collect = () => {
-      for (const el of Array.from(document.querySelectorAll('td, div, span, p, a'))) {
-        if (!isVisible(el)) continue;
-        const text = normalizeText(el.innerText || el.textContent || '');
-        const found = getEmailsFromText(text);
-        if (!found.length) continue;
-        for (const email of found) {
-          const row = findLikelyRow(el, email);
-          const rowText = normalizeText(row?.innerText || row?.textContent || text);
-          const key = `${email}::${rowText.slice(0, 180)}`;
-          if (seenRows.has(key)) continue;
-          seenRows.add(key);
-          emails.push(email);
-        }
-      }
-    };
-
-    setScrollTop(scroller, 0);
-    await sleep(120);
-    collect();
-
-    for (let pos = 0; pos <= max + step; pos += step) {
-      if (state.stopRequested) break;
-      setScrollTop(scroller, Math.min(pos, max));
-      scroller.dispatchEvent?.(new Event('scroll', { bubbles: true }));
-      await sleep(160);
-      collect();
-    }
-
-    setScrollTop(scroller, originalTop);
-    return emails;
-  }
-
-  function findLikelyRow(emailEl, email) {
-    let current = emailEl;
-    const candidates = [];
-    while (current && current !== document.body) {
-      const text = normalizeText(current.innerText || current.textContent || '');
-      const rect = current.getBoundingClientRect();
-      if (text.includes(email) && rect.width > 360 && rect.height >= 28 && rect.height < Math.max(260, innerHeight * 0.4)) {
-        candidates.push(current);
-      }
-      current = current.parentElement;
-    }
-    return candidates.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0] || emailEl;
-  }
-
-  async function filterAccountsByCurrentPage(accounts) {
-    if (!state.currentPageOnly) return accounts;
-
-    log('正在滚动扫描当前页面账号邮箱');
-    const emails = await scanCurrentPageEmails();
-    if (!emails.length) {
-      log('当前页面没有扫描到邮箱，将回退为检测接口返回的全部账号', 'warn');
-      return accounts;
-    }
-
-    const counts = new Map();
-    for (const email of emails) counts.set(email.toLowerCase(), (counts.get(email.toLowerCase()) || 0) + 1);
-
-    const selected = [];
-    for (const account of accounts) {
-      const email = accountEmail(account).toLowerCase();
-      const left = counts.get(email) || 0;
-      if (left <= 0) continue;
-      selected.push(account);
-      counts.set(email, left - 1);
-    }
-
-    log(`当前页面扫描到 ${emails.length} 行，匹配接口账号 ${selected.length} 个`, selected.length ? 'success' : 'warn');
-    return selected.length ? selected : accounts;
   }
 
   async function ensureAuth() {
@@ -853,13 +782,13 @@
     state.running = true;
     state.stopRequested = false;
     resetStats();
+    updateFilterHint();
 
     try {
-      log('开始拉取账号列表');
-      let accounts = await fetchAccounts();
+      log(`开始拉取账号列表（${accountFilterSummary()}）`);
+      const accounts = await fetchAccounts();
       log(`接口返回 ${accounts.length} 个账号`, 'success');
 
-      accounts = await filterAccountsByCurrentPage(accounts);
       state.stats.total = accounts.length;
       updateStats();
 
@@ -908,6 +837,9 @@
       CONFIG,
       state,
       fetchAccounts,
+      rememberAccountFilters,
+      getAccountFiltersFromUrl,
+      accountFilterSummary,
       testModel,
       setAccountSchedulable,
       accountEmail,

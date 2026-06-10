@@ -77,7 +77,7 @@ function plain(value) {
     Intl,
     location: {
       origin: 'https://cat.api.boji1334.com',
-      search: '?group=vip-group&status=active',
+      search: '?status=active',
     },
     localStorage: createStorage({
       auth_token: 'token-123',
@@ -102,7 +102,7 @@ function plain(value) {
       assert.strictEqual(headers?.get?.('Authorization'), 'Bearer token-123', 'Authorization should be attached');
 
       if (parsed.pathname === '/api/v1/admin/accounts') {
-        assert.strictEqual(parsed.searchParams.get('group'), 'vip-group', 'group should follow URL filters');
+        assert.strictEqual(parsed.searchParams.get('subscription'), 'VIP', 'subscription should follow captured page filters');
         assert.strictEqual(parsed.searchParams.get('status'), 'active', 'status should follow URL filters');
         const page = Number(parsed.searchParams.get('page') || 1);
         const pages = {
@@ -142,7 +142,24 @@ function plain(value) {
 
   assert(capturedApi, 'test hook should expose API functions');
   assert.strictEqual(capturedApi.state.testModel, 'gpt-5.5');
-  assert.strictEqual(capturedApi.state.currentPageOnly, true, 'page scan filter should be enabled by default');
+  assert.strictEqual(capturedApi.state.currentPageOnly, undefined, 'page scan filter should be removed');
+  assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active');
+  assert.deepStrictEqual(
+    plain(capturedApi.getAccountFiltersFromUrl('/api/v1/admin/accounts?page=1&page_size=10&status=active&subscription=VIP')),
+    {
+      platform: '',
+      type: '',
+      status: 'active',
+      privacy_mode: '',
+      group: '',
+      search: '',
+      subscription: 'VIP',
+    },
+    'account list URL filters should be parsed without pagination keys'
+  );
+
+  capturedApi.rememberAccountFilters({ status: 'active', subscription: 'VIP' });
+  assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active&subscription=VIP');
 
   const accounts = await capturedApi.fetchAccounts();
   assert.deepStrictEqual(

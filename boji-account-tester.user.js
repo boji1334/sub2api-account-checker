@@ -2,7 +2,7 @@
 // @name         Sub2API Account Model Checker
 // @name:zh-CN   Sub2API 账号模型巡检助手
 // @namespace    https://github.com/boji1334/sub2api-account-checker
-// @version      2.4.1
+// @version      2.5.0
 // @description  Batch test Sub2API account model connectivity from the admin accounts page.
 // @description:zh-CN  在 Sub2API 账号管理页批量测试账号模型连通性，统计成功/失败。
 // @author       boji1334
@@ -32,6 +32,10 @@
     testModelStorageKey: '__boji_account_checker_test_model__',
     selectedGroupStorageKey: '__boji_account_checker_selected_group__',
     disableStorageKey: '__boji_account_checker_disable_failed__',
+    autoCheckStorageKey: '__boji_account_checker_auto_check__',
+    autoIntervalStorageKey: '__boji_account_checker_auto_interval_minutes__',
+    autoDisabledStorageKey: '__boji_account_checker_auto_disabled_ids__',
+    defaultAutoIntervalMinutes: 30,
   };
 
   const ACCOUNT_FILTER_EXCLUDE_KEYS = new Set(['page', 'page_size', 'timezone']);
@@ -46,6 +50,11 @@
     selectedGroupKey: localStorage.getItem(CONFIG.selectedGroupStorageKey) || '',
     lastAppliedFilters: null,
     disableFailed: localStorage.getItem(CONFIG.disableStorageKey) === 'true',
+    autoCheck: localStorage.getItem(CONFIG.autoCheckStorageKey) === 'true',
+    autoIntervalMinutes: Math.max(1, Number(localStorage.getItem(CONFIG.autoIntervalStorageKey) || CONFIG.defaultAutoIntervalMinutes)),
+    autoTimer: null,
+    nextAutoRunAt: null,
+    autoDisabledIds: loadAutoDisabledIds(),
     running: false,
     stopRequested: false,
     panelReady: false,
@@ -74,6 +83,87 @@
     };
 
     return aliases[compact] || value;
+  }
+
+  function normalizePlatform(platform) {
+    const value = String(platform || '').trim().toLowerCase();
+    if (value === 'claude') return 'anthropic';
+    return value;
+  }
+
+  function defaultModelForPlatform(platform) {
+    switch (normalizePlatform(platform)) {
+      case 'anthropic':
+        return 'claude-sonnet-4-5';
+      case 'gemini':
+        return 'gemini-2.5-flash';
+      case 'antigravity':
+        return 'gemini-2.5-pro';
+      case 'openai':
+      default:
+        return CONFIG.defaultTestModel;
+    }
+  }
+
+  function modelPlatform(model) {
+    const value = normalizeModelId(model).toLowerCase();
+    if (value.startsWith('claude-')) return 'anthropic';
+    if (value.startsWith('gemini-')) return 'gemini';
+    if (value.startsWith('gpt-') || value.startsWith('o') || value.startsWith('codex-')) return 'openai';
+    return '';
+  }
+
+  function setTestModel(model, { persist = true, logChange = false } = {}) {
+    const next = normalizeModelId(model);
+    if (!next) return false;
+    state.testModel = next;
+    if (persist) localStorage.setItem(CONFIG.testModelStorageKey, state.testModel);
+    if (typeof document !== 'undefined') {
+      const input = document.querySelector('#boji-account-checker-model');
+      if (input) input.value = state.testModel;
+      const label = document.querySelector('#boji-account-checker-target-model');
+      if (label) label.textContent = state.testModel;
+    }
+    if (logChange) log(`已设置测试模型：${state.testModel}`, 'success');
+    return true;
+  }
+
+  function syncTestModelForSelectedGroup({ force = false, logChange = false } = {}) {
+    const group = getSelectedGroup();
+    if (!group) return false;
+    const platform = normalizePlatform(group.platform);
+    if (!platform) return false;
+    const currentPlatform = modelPlatform(state.testModel);
+    if (!force && currentPlatform && currentPlatform === platform) return false;
+    if (!force && currentPlatform && currentPlatform !== 'openai' && platform !== 'openai') return false;
+    const next = defaultModelForPlatform(platform);
+    if (normalizeModelId(next) === state.testModel) return false;
+    setTestModel(next, { persist: true, logChange: false });
+    if (logChange) log(`已按 ${group.name}（${platform}）切换测试模型：${state.testModel}`, 'success');
+    return true;
+  }
+
+  function loadAutoDisabledIds() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CONFIG.autoDisabledStorageKey) || '[]');
+      return new Set(Array.isArray(parsed) ? parsed.map((id) => String(id)) : []);
+    } catch (_) {
+      return new Set();
+    }
+  }
+
+  function saveAutoDisabledIds() {
+    localStorage.setItem(CONFIG.autoDisabledStorageKey, JSON.stringify([...state.autoDisabledIds]));
+  }
+
+  function getAutoStatusText() {
+    if (!state.autoCheck) return '自动检测：关闭';
+    if (state.running) return '自动检测：本轮运行中';
+    if (!state.nextAutoRunAt) return '自动检测：等待启动';
+    const remainMs = Math.max(0, state.nextAutoRunAt - Date.now());
+    const minutes = Math.floor(remainMs / 60000);
+    const seconds = Math.floor((remainMs % 60000) / 1000);
+    return `自动检测：${minutes}分${String(seconds).padStart(2, '0')}秒后`;
   }
 
   function normalizeAccountFilters(filters = {}) {
@@ -308,6 +398,7 @@
 
     if (current && state.groups.some((group) => group.key === current)) {
       select.value = current;
+      syncTestModelForSelectedGroup();
     } else {
       state.selectedGroupKey = '';
       select.value = '';
@@ -670,7 +761,7 @@
         <div class="bac-header">
           <div class="bac-title">
             <strong>账号模型巡检</strong>
-            <span>API 模式，目标模型：${escapeHtml(state.testModel)}</span>
+            <span>API 模式，目标模型：<b id="boji-account-checker-target-model">${escapeHtml(state.testModel)}</b></span>
             <span><a href="${escapeHtml(CONFIG.repoUrl)}" target="_blank" rel="noopener noreferrer">GitHub: boji1334/sub2api-account-checker · 求 Star</a></span>
           </div>
           <button id="boji-account-checker-collapse">-</button>
@@ -705,7 +796,16 @@
               <input id="boji-account-checker-disable" type="checkbox" ${state.disableFailed ? 'checked' : ''}>
               失败自动关闭调度
             </label>
+            <label class="bac-check">
+              <input id="boji-account-checker-auto" type="checkbox" ${state.autoCheck ? 'checked' : ''}>
+              自动检测
+            </label>
+            <label class="bac-field" style="width: 108px;">
+              间隔分钟
+              <input id="boji-account-checker-auto-interval" type="number" min="1" step="1" value="${escapeHtml(state.autoIntervalMinutes)}">
+            </label>
           </div>
+          <div id="boji-account-checker-auto-status" class="bac-filter">${escapeHtml(getAutoStatusText())}</div>
           <div class="bac-stats">
             <div class="bac-stat"><span>总数</span><strong data-stat="total">0</strong></div>
             <div class="bac-stat"><span>已测</span><strong data-stat="checked">0</strong></div>
@@ -739,10 +839,7 @@
     shell.querySelector('#boji-account-checker-model').addEventListener('change', (event) => {
       const model = event.target.value.trim();
       if (!model) return;
-      state.testModel = normalizeModelId(model);
-      event.target.value = state.testModel;
-      localStorage.setItem(CONFIG.testModelStorageKey, state.testModel);
-      log(`已设置测试模型：${state.testModel}`, 'success');
+      setTestModel(model, { persist: true, logChange: true });
     });
     shell.querySelector('#boji-account-checker-timeout').addEventListener('change', (event) => {
       const seconds = Math.max(1, Number(event.target.value || 1));
@@ -757,6 +854,7 @@
       } else {
         localStorage.removeItem(CONFIG.selectedGroupStorageKey);
       }
+      syncTestModelForSelectedGroup({ logChange: true });
       updateFilterHint();
       log(`已选择巡检范围：${effectiveFilterSummary()}`, 'success');
     });
@@ -769,6 +867,26 @@
       state.disableFailed = event.target.checked;
       localStorage.setItem(CONFIG.disableStorageKey, String(state.disableFailed));
       log(state.disableFailed ? '失败账号会自动关闭调度' : '失败账号只统计，不自动关闭', state.disableFailed ? 'warn' : 'success');
+    });
+    shell.querySelector('#boji-account-checker-auto').addEventListener('change', (event) => {
+      state.autoCheck = event.target.checked;
+      localStorage.setItem(CONFIG.autoCheckStorageKey, String(state.autoCheck));
+      if (state.autoCheck) {
+        scheduleNextAutoRun(0);
+        log(`自动检测已开启，每 ${state.autoIntervalMinutes} 分钟运行一次`, 'success');
+      } else {
+        clearAutoTimer();
+        log('自动检测已关闭', 'warn');
+      }
+      updateAutoStatus();
+    });
+    shell.querySelector('#boji-account-checker-auto-interval').addEventListener('change', (event) => {
+      state.autoIntervalMinutes = Math.max(1, Number(event.target.value || CONFIG.defaultAutoIntervalMinutes));
+      event.target.value = state.autoIntervalMinutes;
+      localStorage.setItem(CONFIG.autoIntervalStorageKey, String(state.autoIntervalMinutes));
+      log(`自动检测间隔已设置为 ${state.autoIntervalMinutes} 分钟`, 'success');
+      if (state.autoCheck && !state.running) scheduleNextAutoRun(state.autoIntervalMinutes * 60 * 1000);
+      updateAutoStatus();
     });
     shell.querySelector('#boji-account-checker-start').addEventListener('click', () => run().catch((error) => {
       state.running = false;
@@ -802,6 +920,40 @@
       const el = root.querySelector(`[data-stat="${key}"]`);
       if (el) el.textContent = String(value);
     }
+    updateAutoStatus();
+  }
+
+  function updateAutoStatus() {
+    if (typeof document === 'undefined') return;
+    const el = document.querySelector('#boji-account-checker-auto-status');
+    if (el) el.textContent = getAutoStatusText();
+  }
+
+  function clearAutoTimer() {
+    if (state.autoTimer) {
+      clearTimeout(state.autoTimer);
+      state.autoTimer = null;
+    }
+    state.nextAutoRunAt = null;
+    updateAutoStatus();
+  }
+
+  function scheduleNextAutoRun(delayMs) {
+    clearAutoTimer();
+    if (!state.autoCheck) return;
+    const delay = Math.max(0, Number(delayMs || 0));
+    state.nextAutoRunAt = Date.now() + delay;
+    updateAutoStatus();
+    state.autoTimer = setTimeout(() => {
+      state.autoTimer = null;
+      state.nextAutoRunAt = null;
+      run({ auto: true }).catch((error) => {
+        state.running = false;
+        updateStats();
+        log(`自动检测异常：${error.message || error}`, 'error');
+        if (state.autoCheck) scheduleNextAutoRun(state.autoIntervalMinutes * 60 * 1000);
+      });
+    }, delay);
   }
 
   function resetStats() {
@@ -1080,23 +1232,25 @@
     log(`已复制 ${state.failedRows.length} 条失败记录`, 'success');
   }
 
-  async function run() {
+  async function run(options = {}) {
     if (state.running) {
       log('已有任务在运行', 'warn');
       return;
     }
     if (!(await ensureAuth())) {
       log('缺少 Authorization，已取消', 'error');
+      if (options.auto && state.autoCheck) scheduleNextAutoRun(state.autoIntervalMinutes * 60 * 1000);
       return;
     }
 
     state.running = true;
     state.stopRequested = false;
+    if (options.auto) clearAutoTimer();
     resetStats();
     updateFilterHint();
 
     try {
-      log(`开始拉取账号列表（${effectiveFilterSummary()}）`);
+      log(`${options.auto ? '自动检测' : '手动巡检'}开始拉取账号列表（${effectiveFilterSummary()}）`);
       const accounts = await fetchAccounts();
       log(`接口返回 ${accounts.length} 个账号`, 'success');
 
@@ -1117,6 +1271,16 @@
         if (result.ok) {
           state.stats.ok += 1;
           log(`${title} ${model} 正常`, 'success');
+          if (state.autoDisabledIds.has(String(account.id))) {
+            const on = await setAccountSchedulable(account.id, true);
+            if (on.ok) {
+              state.autoDisabledIds.delete(String(account.id));
+              saveAutoDisabledIds();
+              log(`${title} 已恢复调度`, 'success');
+            } else {
+              log(`${title} 恢复调度失败：${on.reason}`, 'error');
+            }
+          }
         } else {
           state.stats.failed += 1;
           state.failedRows.push({ id: account.id, email, reason: result.reason });
@@ -1126,6 +1290,8 @@
             const off = await setAccountSchedulable(account.id, false);
             if (off.ok) {
               state.stats.disabled += 1;
+              state.autoDisabledIds.add(String(account.id));
+              saveAutoDisabledIds();
               log(`${title} 已关闭调度`, 'success');
             } else {
               log(`${title} 关闭调度失败：${off.reason}`, 'error');
@@ -1140,6 +1306,7 @@
     } finally {
       state.running = false;
       updateStats();
+      if (state.autoCheck) scheduleNextAutoRun(state.autoIntervalMinutes * 60 * 1000);
     }
   }
 
@@ -1155,6 +1322,10 @@
       getAccountFiltersFromUrl,
       accountFilterSummary,
       effectiveFilterSummary,
+      defaultModelForPlatform,
+      modelPlatform,
+      setTestModel,
+      syncTestModelForSelectedGroup,
       testModel,
       setAccountSchedulable,
       accountEmail,
@@ -1167,6 +1338,10 @@
   waitDomReady().then(() => {
     ensurePanel();
     refreshGroups();
+    if (state.autoCheck) {
+      scheduleNextAutoRun(0);
+      log(`自动检测已开启，每 ${state.autoIntervalMinutes} 分钟运行一次`, 'success');
+    }
     if (state.authHeader) {
       log('脚本已就绪，已读取 Authorization', 'success');
     } else {

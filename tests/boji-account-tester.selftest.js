@@ -109,6 +109,7 @@ function plain(value) {
           data: [
             { id: 7, name: 'regular', platform: 'openai' },
             { id: 9, name: 'VIP', platform: 'openai' },
+            { id: 11, name: 'Claude', platform: 'anthropic' },
           ],
         });
       }
@@ -147,7 +148,10 @@ function plain(value) {
       const schedulableMatch = parsed.pathname.match(/^\/api\/v1\/admin\/accounts\/(\d+)\/schedulable$/);
       if (schedulableMatch) {
         assert.strictEqual(options.method, 'POST');
-        assert.deepStrictEqual(JSON.parse(options.body), { schedulable: false });
+        assert.deepStrictEqual(
+          JSON.parse(options.body),
+          { schedulable: requests[requests.length - 1].body.schedulable }
+        );
         return jsonResponse({ code: 0, data: {} });
       }
 
@@ -169,6 +173,8 @@ function plain(value) {
   assert.strictEqual(normalizedGroups.length, 1, 'group options should deduplicate groups');
   assert.strictEqual(normalizedGroups[0].key, 'id:9');
   assert.strictEqual(normalizedGroups[0].name, 'VIP');
+  assert.strictEqual(capturedApi.defaultModelForPlatform('anthropic'), 'claude-sonnet-4-5');
+  assert.strictEqual(capturedApi.modelPlatform('claude-sonnet-4-5'), 'anthropic');
   assert.deepStrictEqual(
     plain(capturedApi.getAccountFiltersFromUrl('/api/v1/admin/accounts?page=1&page_size=10&status=active&subscription=VIP')),
     {
@@ -185,6 +191,10 @@ function plain(value) {
 
   const groups = await capturedApi.fetchGroups();
   capturedApi.state.groups = groups;
+  capturedApi.state.selectedGroupKey = 'id:11';
+  assert.strictEqual(capturedApi.syncTestModelForSelectedGroup({ force: true }), true);
+  assert.strictEqual(capturedApi.state.testModel, 'claude-sonnet-4-5');
+  capturedApi.setTestModel('gpt-5.5');
   capturedApi.state.selectedGroupKey = 'id:9';
   capturedApi.rememberAccountFilters({ status: 'disabled', subscription: 'ignored' });
   assert.strictEqual(capturedApi.accountFilterSummary(), 'status=active', 'page filters should not override a manual group choice');
@@ -200,6 +210,7 @@ function plain(value) {
   assert.deepStrictEqual(plain(await capturedApi.testModel(1, 'GPT-5.5')), { ok: true, reason: 'success' });
   assert.deepStrictEqual(plain(await capturedApi.testModel(2, 'GPT-5.5')), { ok: false, reason: 'mock failure' });
   assert.deepStrictEqual(plain(await capturedApi.setAccountSchedulable(2, false)), { ok: true });
+  assert.deepStrictEqual(plain(await capturedApi.setAccountSchedulable(2, true)), { ok: true });
 
   assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.group === 'VIP').length, 1);
   assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.subscription === 'VIP').length, 1);
@@ -207,6 +218,7 @@ function plain(value) {
   assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && request.subscription === '9').length, 1);
   assert.strictEqual(requests.filter((request) => request.path === '/api/v1/admin/accounts' && !request.group && !request.subscription).length, 2);
   assert(requests.some((request) => request.path.endsWith('/2/schedulable') && request.body.schedulable === false));
+  assert(requests.some((request) => request.path.endsWith('/2/schedulable') && request.body.schedulable === true));
 
   console.log('boji-account-tester API selftest passed');
 })().catch((error) => {
